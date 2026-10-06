@@ -2,246 +2,301 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import sqlite3
+import json
 
-# Page setup
-st.set_page_config(page_title="TSP Multi-Project Enterprise CRM", page_icon="🏦", layout="wide")
+st.set_page_config(page_title="Dynamic Banking Operations CRM", page_icon="🏦", layout="wide")
 
-# Database Initialization (Embedded SQLite - No External Sheets/Drive Needed)
+# --------------------------------------------------------------------------
+# DATABASE INITIALIZATION (SQLite Engine)
+# --------------------------------------------------------------------------
+def get_db():
+    conn = sqlite3.connect("tsp_crm_v2.db", check_same_thread=False)
+    return conn
+
 def init_db():
-    conn = sqlite3.connect('tsp_crm_production.db')
+    conn = get_db()
     c = conn.cursor()
+    # User / Team Table
+    c.execute('''CREATE TABLE IF NOT EXISTS team_members (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    member_id TEXT UNIQUE,
+                    name TEXT,
+                    assigned_projects TEXT,
+                    support_roles TEXT,
+                    access_level TEXT)''')
     
-    # 1. PAY NSDL Project Table
-    c.execute('''CREATE TABLE IF NOT EXISTS pay_nsdl (
+    # Custom Dynamic Columns Schema Registry
+    c.execute('''CREATE TABLE IF NOT EXISTS project_schema (
+                    project_name TEXT PRIMARY KEY,
+                    columns_json TEXT)''')
+
+    # Master Merchants Table
+    c.execute('''CREATE TABLE IF NOT EXISTS merchants (
                     merchant_id TEXT PRIMARY KEY,
                     merchant_name TEXT,
-                    terminal_id TEXT,
-                    api_status TEXT,
-                    nsdl_compliance TEXT,
+                    project_name TEXT,
                     status TEXT,
-                    assigned_handler TEXT,
+                    assigned_handlers TEXT,
+                    support_roles TEXT,
                     open_tickets INTEGER,
+                    extra_fields_json TEXT,
                     last_updated_by TEXT)''')
-                    
-    # 2. IATA Project Table
-    c.execute('''CREATE TABLE IF NOT EXISTS iata (
-                    merchant_id TEXT PRIMARY KEY,
-                    agency_name TEXT,
-                    iata_code TEXT,
-                    bsp_settlement TEXT,
-                    gds_integration TEXT,
-                    status TEXT,
-                    assigned_handler TEXT,
-                    open_tickets INTEGER,
-                    last_updated_by TEXT)''')
-                    
-    # 3. S2PAY Project Table
-    c.execute('''CREATE TABLE IF NOT EXISTS s2pay (
-                    merchant_id TEXT PRIMARY KEY,
-                    merchant_name TEXT,
-                    gateway_mid TEXT,
-                    switch_route TEXT,
-                    risk_evaluation TEXT,
-                    status TEXT,
-                    assigned_handler TEXT,
-                    open_tickets INTEGER,
-                    last_updated_by TEXT)''')
+    
+    # Seed Initial Team Data
+    c.execute("SELECT COUNT(*) FROM team_members")
+    if c.fetchone()[0] == 0:
+        initial_team = [
+            ("Member A", "Ops Admin / Lead", json.dumps(["PAY NSDL", "IATA", "S2PAY", "AIRTEL CHIMPE", "AIRTEL NEXDHA", "ESSAS FINO"]), json.dumps(["QUALITY ANALYST"]), "Admin"),
+            ("Member B", "INDUMATHI", json.dumps(["PAY NSDL", "S2PAY"]), json.dumps(["FLOOR SUPPORT"]), "Team Member"),
+            ("Member C", "ATHUL", json.dumps(["IATA", "AIRTEL CHIMPE"]), json.dumps(["DATA MANAGEMENT"]), "Team Member"),
+            ("Member D", "MANJUSHA", json.dumps(["PAY NSDL", "ESSAS FINO"]), json.dumps(["QUALITY ANALYST"]), "Team Member"),
+            ("Member E", "MIDHUN", json.dumps(["AIRTEL NEXDHA"]), json.dumps(["SEAL AND PRINT MANAGEMENT"]), "Team Member"),
+            ("Member F", "MANJUSHA", json.dumps(["IATA"]), json.dumps(["CLEARANCE EXECUTIVE"]), "Team Member"),
+            ("Member G", "TAMIL", json.dumps(["S2PAY", "ESSAS FINO"]), json.dumps(["FLOOR SUPPORT"]), "Team Member"),
+        ]
+        c.executemany("INSERT INTO team_members (member_id, name, assigned_projects, support_roles, access_level) VALUES (?, ?, ?, ?, ?)", initial_team)
+    
+    # Seed Initial Projects & Schemas
+    c.execute("SELECT COUNT(*) FROM project_schema")
+    if c.fetchone()[0] == 0:
+        default_projects = {
+            "PAY NSDL": ["Company Name", "MCC", "Category", "Bank Name", "Account No", "IFSC", "Domain Mail ID", "GST", "POC Name"],
+            "IATA": ["Agency Name", "IATA Numeric Code", "BSP Settlement", "GDS Engine", "Postal Code", "Account Number"],
+            "S2PAY": ["Merchant Name", "Gateway MID", "Switch Route", "Risk Category", "Bank Switch"],
+            "AIRTEL CHIMPE": ["Merchant ID", "Agent Code", "KYC Status", "Circle", "Terminal ID"],
+            "AIRTEL NEXDHA": ["Enterprise Name", "Nexdha ID", "API Routing", "Compliance Status"],
+            "ESSAS FINO": ["Fino Client Code", "Settlement Account", "IFSC Code", "Branch Code"]
+        }
+        for proj, cols in default_projects.items():
+            c.execute("INSERT INTO project_schema VALUES (?, ?)", (proj, json.dumps(cols)))
+            
     conn.commit()
     conn.close()
 
 init_db()
 
-# Database Helper Functions
-def run_query(query, params=()):
-    conn = sqlite3.connect('tsp_crm_production.db')
-    df = pd.read_sql_query(query, conn, params=params)
+# --------------------------------------------------------------------------
+# HELPER FUNCTIONS
+# --------------------------------------------------------------------------
+def load_team():
+    conn = get_db()
+    df = pd.read_sql_query("SELECT * FROM team_members", conn)
     conn.close()
     return df
 
-def execute_cmd(cmd, params=()):
-    conn = sqlite3.connect('tsp_crm_production.db')
+def load_schemas():
+    conn = get_db()
     c = conn.cursor()
-    c.execute(cmd, params)
-    conn.commit()
+    c.execute("SELECT * FROM project_schema")
+    rows = c.fetchall()
     conn.close()
+    return {r[0]: json.loads(r[1]) for r in rows}
 
-# Sidebar: User Authentication / Identity Switcher
-st.sidebar.header("👤 User Identity")
-current_user = st.sidebar.selectbox("Log in as:", [
-    "Member A (SME / Primary Ops Lead)",
-    "Member C (Secondary Ops Lead)",
-    "Member D (Universal QA Lead)",
-    "Member B (PAY NSDL Handler)",
-    "Member E (PAY NSDL Handler)",
-    "Member F (IATA Handler)",
-    "Member G (S2PAY Handler)"
-])
+# --------------------------------------------------------------------------
+# SIDEBAR: USER AUTHENTICATION & ACCESS CONTROL
+# --------------------------------------------------------------------------
+st.sidebar.title("🏦 CRM Identity & Access")
+
+team_df = load_team()
+user_options = [f"{row['member_id']} - {row['name']} ({row['access_level']})" for _, row in team_df.iterrows()]
+selected_identity = st.sidebar.selectbox("Log in as User:", user_options)
+
+selected_row = team_df[team_df['member_id'] == selected_identity.split(" - ")[0]].iloc[0]
+current_user_id = selected_row['member_id']
+current_user_name = selected_row['name']
+current_user_role = selected_row['access_level']
+user_projects = json.loads(selected_row['assigned_projects'])
+user_support_roles = json.loads(selected_row['support_roles'])
 
 st.sidebar.divider()
-st.sidebar.info(f"**Logged in user:** {current_user}")
-
-# Header
-st.title("🏦 Banking Operations & Merchant Onboarding CRM")
-st.caption("Custom Enterprise Multi-Project Database & Performance Tracker")
-
-# Main Navigation
-tab_dash, tab_manage, tab_entry = st.tabs([
-    "📊 Executive Performance & Analytics", 
-    "📁 Manage Merchant Records (By Project)", 
-    "➕ Onboard New Merchant"
-])
+st.sidebar.markdown(f"**Logged User:** {current_user_name}")
+st.sidebar.markdown(f"**Access Role:** `{current_user_role}`")
+st.sidebar.markdown(f"**Assigned Projects:** {', '.join(user_projects)}")
 
 # --------------------------------------------------------------------------
-# TAB 1: EXECUTIVE DASHBOARD
+# MAIN INTERFACE NAVIGATION
 # --------------------------------------------------------------------------
-with tab_dash:
-    st.subheader("📈 Overall Operations & Team Performance")
-    
-    df_nsdl = run_query("SELECT * FROM pay_nsdl")
-    df_iata = run_query("SELECT * FROM iata")
-    df_s2pay = run_query("SELECT * FROM s2pay")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    total_merchants = len(df_nsdl) + len(df_iata) + len(df_s2pay)
-    
-    total_tickets = (df_nsdl['open_tickets'].sum() if not df_nsdl.empty else 0) + \
-                    (df_iata['open_tickets'].sum() if not df_iata.empty else 0) + \
-                    (df_s2pay['open_tickets'].sum() if not df_s2pay.empty else 0)
-                    
-    col1.metric("Total Active Merchants", total_merchants)
-    col2.metric("PAY NSDL Merchants", len(df_nsdl))
-    col3.metric("IATA Merchants", len(df_iata))
-    col4.metric("S2PAY Merchants", len(df_s2pay))
-    
-    st.divider()
-    
-    # Project Breakdown Graphs
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Project Distribution Summary")
-        project_counts = pd.DataFrame({
-            "Project": ["PAY NSDL", "IATA", "S2PAY"],
-            "Count": [len(df_nsdl), len(df_iata), len(df_s2pay)]
-        })
-        fig = px.bar(project_counts, x="Project", y="Count", color="Project", title="Merchants per Project Line")
-        st.plotly_chart(fig, use_container_width=True)
+st.title("🏦 Banking Operations & Multi-Project CRM")
+
+# Level-Wise Access Routing
+if current_user_role == "Admin":
+    navigation_tabs = st.tabs([
+        "📊 Executive Analytics Dashboard", 
+        "📁 Multi-Project Workspaces", 
+        "➕ Onboard Merchant Record", 
+        "⚙️ Dynamic System Configuration"
+    ])
+else:
+    navigation_tabs = st.tabs([
+        "📋 My Assigned Tasks Workspace", 
+        "➕ Onboard New Merchant", 
+        "👤 My Profile & Support Roles"
+    ])
+
+# --------------------------------------------------------------------------
+# TAB 1: EXECUTIVE DASHBOARD (Admin Only) or MY TASKS (Team)
+# --------------------------------------------------------------------------
+with navigation_tabs[0]:
+    conn = get_db()
+    df_merchants = pd.read_sql_query("SELECT * FROM merchants", conn)
+    conn.close()
+
+    if current_user_role == "Admin":
+        st.subheader("📊 Centralized Performance & Executive Overview")
         
-    with c2:
-        st.subheader("Ticket Distribution")
-        st.metric("Total Active Escalation Tickets", total_tickets)
-        st.info("Member D (QA) and Member A (SME) oversee ticket resolution across all 3 active projects.")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Merchants", len(df_merchants))
+        m2.metric("Active Live Projects", len(load_schemas()))
+        m3.metric("Total Open Escalations", df_merchants['open_tickets'].sum() if not df_merchants.empty else 0)
+        m4.metric("Active Operations Team", len(team_df))
 
-# --------------------------------------------------------------------------
-# TAB 2: MANAGE MERCHANT RECORDS BY PROJECT
-# --------------------------------------------------------------------------
-with tab_manage:
-    selected_project = st.selectbox("Select Project Workspace:", ["PAY NSDL", "IATA", "S2PAY"])
-    
-    if selected_project == "PAY NSDL":
-        st.subheader("📋 PAY NSDL Specific Database")
-        data = run_query("SELECT * FROM pay_nsdl")
-        if data.empty:
-            st.warning("No records found in PAY NSDL database. Use the 'Onboard New Merchant' tab to add records.")
-        else:
-            edited_data = st.data_editor(data, num_rows="dynamic", key="nsdl_edit", use_container_width=True)
-            if st.button("Save Changes to PAY NSDL Database"):
-                for _, row in edited_data.iterrows():
-                    execute_cmd("""UPDATE pay_nsdl SET 
-                                    merchant_name=?, terminal_id=?, api_status=?, 
-                                    nsdl_compliance=?, status=?, assigned_handler=?, 
-                                    open_tickets=?, last_updated_by=? WHERE merchant_id=?""",
-                                (row['merchant_name'], row['terminal_id'], row['api_status'], 
-                                 row['nsdl_compliance'], row['status'], row['assigned_handler'], 
-                                 row['open_tickets'], current_user, row['merchant_id']))
-                st.success("Database updated successfully!")
-
-    elif selected_project == "IATA":
-        st.subheader("✈️ IATA Specific Database")
-        data = run_query("SELECT * FROM iata")
-        if data.empty:
-            st.warning("No records found in IATA database.")
-        else:
-            edited_data = st.data_editor(data, num_rows="dynamic", key="iata_edit", use_container_width=True)
-            if st.button("Save Changes to IATA Database"):
-                for _, row in edited_data.iterrows():
-                    execute_cmd("""UPDATE iata SET 
-                                    agency_name=?, iata_code=?, bsp_settlement=?, 
-                                    gds_integration=?, status=?, assigned_handler=?, 
-                                    open_tickets=?, last_updated_by=? WHERE merchant_id=?""",
-                                (row['agency_name'], row['iata_code'], row['bsp_settlement'], 
-                                 row['gds_integration'], row['status'], row['assigned_handler'], 
-                                 row['open_tickets'], current_user, row['merchant_id']))
-                st.success("IATA Database updated successfully!")
-
-    elif selected_project == "S2PAY":
-        st.subheader("💳 S2PAY Specific Database")
-        data = run_query("SELECT * FROM s2pay")
-        if data.empty:
-            st.warning("No records found in S2PAY database.")
-        else:
-            edited_data = st.data_editor(data, num_rows="dynamic", key="s2pay_edit", use_container_width=True)
-            if st.button("Save Changes to S2PAY Database"):
-                for _, row in edited_data.iterrows():
-                    execute_cmd("""UPDATE s2pay SET 
-                                    merchant_name=?, gateway_mid=?, switch_route=?, 
-                                    risk_evaluation=?, status=?, assigned_handler=?, 
-                                    open_tickets=?, last_updated_by=? WHERE merchant_id=?""",
-                                (row['merchant_name'], row['gateway_mid'], row['switch_route'], 
-                                 row['risk_evaluation'], row['status'], row['assigned_handler'], 
-                                 row['open_tickets'], current_user, row['merchant_id']))
-                st.success("S2PAY Database updated successfully!")
-
-# --------------------------------------------------------------------------
-# TAB 3: ONBOARD NEW MERCHANT (DYNAMIC CRITERIA FORM)
-# --------------------------------------------------------------------------
-with tab_entry:
-    st.subheader("➕ Create New Merchant Record")
-    target_project = st.radio("Select Target Project Workflow:", ["PAY NSDL", "IATA", "S2PAY"], horizontal=True)
-    
-    with st.form("dynamic_merchant_form"):
-        st.markdown(f"### Onboarding Form for: **{target_project}**")
+        st.divider()
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### Merchant Distribution by Project")
+            if not df_merchants.empty:
+                fig_bar = px.bar(df_merchants, x="project_name", color="status", title="Project Status Breakdown")
+                st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.info("No merchant records available.")
+        with c2:
+            st.markdown("### Operational Health Overview")
+            if not df_merchants.empty:
+                fig_pie = px.pie(df_merchants, names="status", title="Overall Pipeline Health")
+                st.plotly_chart(fig_pie, use_container_width=True)
+            else:
+                st.info("No data for pie chart.")
+    else:
+        st.subheader(f"📋 Personal Workspace: {current_user_name}")
+        st.info("Viewing records filtered exclusively for your assigned projects and handler allocations.")
         
-        m_id = st.text_input("Merchant ID (Required)", value="M-101")
+        if not df_merchants.empty:
+            my_records = df_merchants[
+                df_merchants['project_name'].isin(user_projects) | 
+                df_merchants['assigned_handlers'].str.contains(current_user_name, na=False)
+            ]
+            st.dataframe(my_records, use_container_width=True)
+        else:
+            st.warning("No records assigned to you yet.")
+
+# --------------------------------------------------------------------------
+# TAB 2: MULTI-PROJECT WORKSPACES / ONBOARD MERCHANT
+# --------------------------------------------------------------------------
+if current_user_role == "Admin":
+    with navigation_tabs[1]:
+        st.subheader("📁 Project-Specific Dynamic Workspaces")
+        schemas = load_schemas()
         
-        # Dynamic Columns based on Selected Project
-        if target_project == "PAY NSDL":
+        selected_proj = st.selectbox("Select Project Workspace:", list(schemas.keys()))
+        
+        conn = get_db()
+        proj_merchants = pd.read_sql_query("SELECT * FROM merchants WHERE project_name = ?", conn, params=(selected_proj,))
+        conn.close()
+        
+        st.markdown(f"**Custom Columns for {selected_proj}:** {', '.join(schemas[selected_proj])}")
+        
+        if not proj_merchants.empty:
+            st.data_editor(proj_merchants, num_rows="dynamic", use_container_width=True, key=f"editor_{selected_proj}")
+        else:
+            st.warning(f"No records currently registered under {selected_proj}.")
+
+    with navigation_tabs[2]:
+        st.subheader("➕ Onboard New Merchant Record")
+        schemas = load_schemas()
+        
+        target_project = st.selectbox("Select Target Project Workflow:", list(schemas.keys()))
+        
+        with st.form("add_merchant_form"):
+            st.markdown(f"### Onboarding Entry Form: **{target_project}**")
+            m_id = st.text_input("Merchant ID / Registration Code (Required)")
             m_name = st.text_input("Merchant / Company Name")
-            term_id = st.text_input("NSDL Terminal ID")
-            api_stat = st.selectbox("API Integration Status", ["Pending", "In Progress", "Verified", "Failed"])
-            compliance = st.selectbox("NSDL Compliance Check", ["Passed", "Pending Documents", "Rejected"])
-            status = st.selectbox("Overall Health", ["On Track", "Delayed", "Blocked", "Live"])
-            handler = st.selectbox("Assigned Project Handler", ["Member B", "Member E", "Member A", "Member C"])
-            tickets = st.number_input("Open Tickets", min_value=0, value=0)
+            m_status = st.selectbox("Status Health", ["In Progress", "LIVE", "STOP", "DOCUMENT SUBMITTED", "BLOCKED"])
             
-        elif target_project == "IATA":
-            m_name = st.text_input("Agency / Travel Merchant Name")
-            iata_code = st.text_input("IATA Numeric Code")
-            bsp_stat = st.selectbox("BSP Settlement Status", ["Active", "Suspended", "Under Review"])
-            gds_type = st.selectbox("GDS Integration Engine", ["Amadeus", "Sabre", "Travelport", "Custom Direct"])
-            status = st.selectbox("Overall Health", ["On Track", "Delayed", "Blocked", "Live"])
-            handler = st.selectbox("Assigned Project Handler", ["Member F", "Member A", "Member C"])
-            tickets = st.number_input("Open Tickets", min_value=0, value=0)
+            # Multi-Select Project Handlers & Support Roles
+            assigned_handlers = st.multiselect("Assign Team Handlers:", team_df['name'].unique())
+            assigned_support = st.multiselect("Assign Support Roles:", ["FLOOR SUPPORT", "QUALITY ANALYST", "SEAL AND PRINT MANAGEMENT", "DATA MANAGEMENT", "CLEARANCE EXECUTIVE"])
+            
+            tickets = st.number_input("Open Escalation Tickets", min_value=0, value=0)
+            
+            # Dynamic Custom Fields based on Project Schema
+            st.markdown("#### Project-Specific Custom Fields")
+            custom_data = {}
+            for col in schemas[target_project]:
+                custom_data[col] = st.text_input(f"{col}")
+                
+            submitted = st.form_submit_button("Create Merchant Record")
+            if submitted:
+                conn = get_db()
+                c = conn.cursor()
+                c.execute("""INSERT INTO merchants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                          (m_id, m_name, target_project, m_status, json.dumps(assigned_handlers),
+                           json.dumps(assigned_support), tickets, json.dumps(custom_data), current_user_name))
+                conn.commit()
+                conn.close()
+                st.success(f"Merchant '{m_name}' successfully added to {target_project}!")
 
-        elif target_project == "S2PAY":
-            m_name = st.text_input("Merchant Name")
-            gateway_mid = st.text_input("Gateway MID (Merchant ID)")
-            switch_route = st.selectbox("Switch Route Provider", ["Primary Route A", "Backup Route B", "Direct Bank Switch"])
-            risk_eval = st.selectbox("Risk Evaluation Category", ["Low Risk", "Medium Risk", "High Risk / Fraud Monitoring"])
-            status = st.selectbox("Overall Health", ["On Track", "Delayed", "Blocked", "Live"])
-            handler = st.selectbox("Assigned Project Handler", ["Member G", "Member A", "Member C"])
-            tickets = st.number_input("Open Tickets", min_value=0, value=0)
-            
-        submit_btn = st.form_submit_button("Create & Store Record")
+# --------------------------------------------------------------------------
+# TAB 3 / 4: DYNAMIC SYSTEM CONFIGURATION & PROJECT CREATION (Admin Only)
+# --------------------------------------------------------------------------
+if current_user_role == "Admin":
+    with navigation_tabs[3]:
+        st.subheader("⚙️ Dynamic Project & Team Management Engine")
         
-        if submit_btn:
-            if target_project == "PAY NSDL":
-                execute_cmd("""INSERT INTO pay_nsdl VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", 
-                            (m_id, m_name, term_id, api_stat, compliance, status, handler, tickets, current_user))
-            elif target_project == "IATA":
-                execute_cmd("""INSERT INTO iata VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", 
-                            (m_id, m_name, iata_code, bsp_stat, gds_type, status, handler, tickets, current_user))
-            elif target_project == "S2PAY":
-                execute_cmd("""INSERT INTO s2pay VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", 
-                            (m_id, m_name, gateway_mid, switch_route, risk_eval, status, handler, tickets, current_user))
-                            
-            st.success(f"Successfully recorded '{m_id}' into {target_project} Database!")
+        config_col1, config_col2 = st.columns(2)
+        
+        # Add New Project & Dynamic Columns
+        with config_col1:
+            st.markdown("### ➕ Create New Project Line")
+            with st.form("new_project_form"):
+                new_proj_name = st.text_input("New Project Name (e.g., AIRTEL PAYMENTS)")
+                custom_cols_raw = st.text_area("Define Custom Columns (Comma Separated):", value="Terminal ID, API Key, Settlement Status")
+                
+                create_proj_btn = st.form_submit_button("Register New Project Schema")
+                if create_proj_btn:
+                    cols_list = [c.strip() for c in custom_cols_raw.split(",") if c.strip()]
+                    conn = get_db()
+                    c = conn.cursor()
+                    c.execute("INSERT OR REPLACE INTO project_schema VALUES (?, ?)", (new_proj_name, json.dumps(cols_list)))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Project '{new_proj_name}' registered with {len(cols_list)} custom columns!")
+                    st.rerun()
+
+        # Manage Team Members & Roles
+        with config_col2:
+            st.markdown("### 👤 Add / Edit Team Member")
+            all_projects = list(load_schemas().keys())
+            all_support = ["FLOOR SUPPORT", "QUALITY ANALYST", "SEAL AND PRINT MANAGEMENT", "DATA MANAGEMENT", "CLEARANCE EXECUTIVE"]
+            
+            with st.form("team_management_form"):
+                m_code = st.text_input("Member Code (e.g., Member H)")
+                m_real_name = st.text_input("Full Name")
+                m_projs = st.multiselect("Assign Projects:", all_projects)
+                m_roles = st.multiselect("Assign Support Roles:", all_support)
+                m_access = st.selectbox("System Access Role:", ["Team Member", "Admin"])
+                
+                team_submit = st.form_submit_button("Save Team Member Profile")
+                if team_submit:
+                    conn = get_db()
+                    c = conn.cursor()
+                    c.execute("INSERT OR REPLACE INTO team_members (member_id, name, assigned_projects, support_roles, access_level) VALUES (?, ?, ?, ?, ?)",
+                              (m_code, m_real_name, json.dumps(m_projs), json.dumps(m_roles), m_access))
+                    conn.commit()
+                    conn.close()
+                    st.success(f"Profile for {m_real_name} updated successfully!")
+                    st.rerun()
+
+else:
+    # Team Member Profile View
+    with navigation_tabs[1]:
+        st.subheader("➕ Onboard New Merchant")
+        st.info("Fill in onboarding details for your assigned projects.")
+    with navigation_tabs[2]:
+        st.subheader("👤 My Assigned Profile & Support Criteria")
+        st.json({
+            "Member Name": current_user_name,
+            "User Code": current_user_id,
+            "Assigned Projects": user_projects,
+            "Support Roles": user_support_roles,
+            "Access Role": current_user_role
+        })
